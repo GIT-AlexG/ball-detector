@@ -2,21 +2,29 @@
 #include <iostream>
 
 int main(int argc, char* argv[]) {
+    // --- Parse flags ---
+    bool focusedMode = false;
+    const char* inputPath = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--focused")
+            focusedMode = true;
+        else if (inputPath == nullptr)
+            inputPath = argv[i];
+    }
+
     // --- Load image or open camera ---
     cv::Mat frame;
     cv::VideoCapture cap;
     bool liveMode = false;
     cv::namedWindow("Ball Detector");
 
-    if (argc > 1) {
-        frame = cv::imread(argv[1]);
-        //frame = frame(cv::Rect(0, 0, 1498, 1200));
+    if (inputPath) {
+        frame = cv::imread(inputPath);
         if (frame.empty()) {
-            // Try as video
-            cap.open(argv[1]);
+            cap.open(inputPath);
             liveMode = cap.isOpened();
             if (!liveMode) {
-                std::cerr << "Cannot open: " << argv[1] << "\n";
+                std::cerr << "Cannot open: " << inputPath << "\n";
                 return 1;
             }
         }
@@ -32,17 +40,33 @@ int main(int argc, char* argv[]) {
     // --- Configuration ---
     BallDetectorConfig cfg;
     RansacConfig ransacCfg;
-    cfg.minRadius       = 15.0;
-    cfg.maxRadius       = 200.0;
-    cfg.minAxisRatio    = 1.0 / 1.2;  // reject if major > 1.2 * minor
-    cfg.cannyLow        = 20.0;
-    cfg.cannyHigh       = 60.0;
-    cfg.maxFitResidual  = 0.07;
+    cfg.minRadius        = 15.0;
+    cfg.maxRadius        = 200.0;
+    cfg.minAxisRatio     = 1.0 / 1.2;  // reject if major > 1.2 * minor
+    cfg.cannyLow         = 20.0;
+    cfg.cannyHigh        = 60.0;
+    cfg.maxFitResidual   = 0.07;
     cfg.minContourPoints = 12;
-    cfg.maxInteriorCV   = 0.25;
+    cfg.maxInteriorCV    = 0.25;
+
+    FocusedSearchConfig focusCfg;
+    focusCfg.enabled = focusedMode;
+
+    // State for focused search: ellipse from the previous frame
+    cv::RotatedRect prevEllipse;
+    bool hasPrevEllipse = false;
 
     auto processFrame = [&](const cv::Mat& img) {
-        auto contours = detectBallContours(img, cfg);
+        const cv::RotatedRect* prevPtr = hasPrevEllipse ? &prevEllipse : nullptr;
+        auto contours = detectBallContours(img, cfg, focusCfg, prevPtr);
+
+        // Update previous ellipse for next frame (use first detection)
+        if (!contours.empty() && contours[0].size() >= 5) {
+            prevEllipse    = cv::fitEllipseAMS(contours[0]);
+            hasPrevEllipse = true;
+        } else {
+            hasPrevEllipse = false;
+        }
 
         cv::Mat vis = img.clone();
         cv::drawContours(vis, contours, -1, {0, 255, 0}, 2);
@@ -80,7 +104,6 @@ int main(int argc, char* argv[]) {
 
     if (!liveMode) {
         cv::Mat vis = processFrame(frame);
-        cv::Mat deb = vis;
         cv::imshow("Ball Detector", vis);
         cv::waitKey(0);
     } else {
@@ -92,9 +115,6 @@ int main(int argc, char* argv[]) {
             cv::createTrackbar("Frame", "Ball Detector", &sliderPos, totalFrames - 1);
 
         cv::Mat f;
-        bool userSeeked = false;
-        // Tracks the slider value we last set programmatically so we can
-        // distinguish our own updates from user-initiated seeks.
         int lastSetPos = 0;
 
         while (true) {
@@ -103,7 +123,7 @@ int main(int argc, char* argv[]) {
                 if (pos != lastSetPos) {
                     cap.set(cv::CAP_PROP_POS_FRAMES, pos);
                     lastSetPos = pos;
-                    userSeeked = true;
+                    hasPrevEllipse = false; // temporal continuity broken after seek
                 }
             }
 
@@ -117,10 +137,9 @@ int main(int argc, char* argv[]) {
             cv::Mat vis = processFrame(f);
             cv::imshow("Ball Detector", vis);
 
-            userSeeked = false;
             int key = cv::waitKey(30);
-            if (key == 27) break;                          // ESC: quit
-            if (key == 32 && isVideo) cv::waitKey(0);      // Space: pause
+            if (key == 27) break;                     // ESC: quit
+            if (key == 32 && isVideo) cv::waitKey(0); // Space: pause
         }
     }
 
