@@ -117,8 +117,8 @@ int main(int argc, char* argv[]) {
             cv::Mat vis = processFrame(f);
             cv::imshow("Ball Detector", vis);
 
-            int key = cv::waitKey(userSeeked ? 0 : 30);
             userSeeked = false;
+            int key = cv::waitKey(30);
             if (key == 27) break;                          // ESC: quit
             if (key == 32 && isVideo) cv::waitKey(0);      // Space: pause
         }
