@@ -82,11 +82,39 @@ int main(int argc, char* argv[]) {
         cv::imshow("Ball Detector", vis);
         cv::waitKey(0);
     } else {
+        const int totalFrames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
+        const bool isVideo = totalFrames > 1; // false for live camera
+
+        int sliderPos = 0;
+        if (isVideo)
+            cv::createTrackbar("Frame", "Ball Detector", &sliderPos, totalFrames - 1);
+
         cv::Mat f;
-        while (cap.read(f)) {
+        bool userSeeked = false;
+
+        while (true) {
+            if (isVideo) {
+                int currentFrame = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES));
+                // Detect if the user moved the slider
+                if (sliderPos != currentFrame) {
+                    cap.set(cv::CAP_PROP_POS_FRAMES, sliderPos);
+                    userSeeked = true;
+                }
+            }
+
+            if (!cap.read(f)) break;
+
+            if (isVideo)
+                sliderPos = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES)) - 1;
+
             cv::Mat vis = processFrame(f);
             cv::imshow("Ball Detector", vis);
-            if (cv::waitKey(1) == 27) break;
+
+            // Pause on seek so the user can inspect the frame; otherwise advance
+            int key = cv::waitKey(userSeeked ? 0 : 30);
+            userSeeked = false;
+            if (key == 27) break;                          // ESC: quit
+            if (key == 32 && isVideo) cv::waitKey(0);      // Space: pause
         }
     }
 
