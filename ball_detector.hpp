@@ -8,8 +8,8 @@ struct BallDetectorConfig {
     double minRadius = 15.0;
     double maxRadius = 200.0;
 
-    // Ellipse axis ratio (minor/major): 1.0 = circle; lower = oblique projection allowed
-    double minAxisRatio = 0.45;
+    // Ellipse axis ratio (minor/major): reject if major > 1.2 * minor (i.e. ratio < 1/1.2)
+    double minAxisRatio = 1.0 / 1.2;
     double maxAxisRatio = 1.0;
 
     // Edge detection

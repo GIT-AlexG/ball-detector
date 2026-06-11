@@ -34,7 +34,7 @@ int main(int argc, char* argv[]) {
     RansacConfig ransacCfg;
     cfg.minRadius       = 15.0;
     cfg.maxRadius       = 200.0;
-    cfg.minAxisRatio    = 0.45;
+    cfg.minAxisRatio    = 1.0 / 1.2;  // reject if major > 1.2 * minor
     cfg.cannyLow        = 20.0;
     cfg.cannyHigh       = 60.0;
     cfg.maxFitResidual  = 0.07;
