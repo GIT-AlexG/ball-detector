@@ -91,6 +91,34 @@ static std::vector<std::vector<cv::Point>> applyNMS(
     return out;
 }
 
+// Rotates an open contour so its geometric endpoints sit at index 0 and n-1.
+// Finds the largest gap between consecutive points (including the wrap-around);
+// that gap marks the break in the open arc. The point after the gap becomes index 0.
+static std::vector<cv::Point> reorderOpenContour(const std::vector<cv::Point>& contour)
+{
+    const int n = static_cast<int>(contour.size());
+    if (n < 2) return contour;
+
+    int splitIdx = 0;
+    float maxGapSq = 0.f;
+    for (int i = 0; i < n; ++i) {
+        const cv::Point& a = contour[i];
+        const cv::Point& b = contour[(i + 1) % n];
+        float dx = static_cast<float>(b.x - a.x);
+        float dy = static_cast<float>(b.y - a.y);
+        float dSq = dx * dx + dy * dy;
+        if (dSq > maxGapSq) { maxGapSq = dSq; splitIdx = i; }
+    }
+
+    // Rotate so the point after the largest gap becomes index 0
+    int start = (splitIdx + 1) % n;
+    std::vector<cv::Point> ordered;
+    ordered.reserve(n);
+    for (int i = 0; i < n; ++i)
+        ordered.push_back(contour[(start + i) % n]);
+    return ordered;
+}
+
 // For a focused-search contour: outer RANSAC tries random endpoint cuts,
 // runs ransacRefineEllipse on each trimmed segment, keeps the result with
 // the most inliers. Returns an empty vector if no good fit is found.
@@ -214,6 +242,9 @@ std::vector<std::vector<cv::Point>> detectBallContours(
 
                 // Translate crop-local coordinates back to full-image space
                 for (auto& p : fc) { p.x += x0; p.y += y0; }
+
+                // Rotate so geometric arc endpoints are at index 0 and n-1
+                fc = reorderOpenContour(fc);
 
                 // Outer RANSAC: try random endpoint cuts, run ransacRefineEllipse
                 // on each trimmed segment, keep the inlier set with most support
