@@ -1,7 +1,6 @@
 #include "ball_detector.hpp"
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <random>
 
 // Normalized algebraic residual of a point relative to a fitted ellipse.
@@ -122,20 +121,23 @@ cv::RotatedRect ransacRefineEllipse(
     }
 
     std::mt19937 rng(42);
-    std::vector<int> idx(n);
-    std::iota(idx.begin(), idx.end(), 0);
+
+    // Maximum points cuttable from each end
+    const int maxCut = static_cast<int>(n * cfg.maxCutFraction);
+    std::uniform_int_distribution<int> cutDist(0, std::max(0, maxCut));
 
     int bestCount = 0;
     cv::RotatedRect bestEl;
-    std::vector<cv::Point> sample(kSample);
 
     for (int iter = 0; iter < cfg.iterations; ++iter) {
-        // Draw kSample distinct random points (partial Fisher–Yates)
-        for (int i = 0; i < kSample; ++i) {
-            std::uniform_int_distribution<int> dist(i, n - 1);
-            std::swap(idx[i], idx[dist(rng)]);
-            sample[i] = contour[idx[i]];
-        }
+        // Remove random-length segments from both ends of the ordered contour
+        int cutStart = cutDist(rng);
+        int cutEnd   = cutDist(rng);
+        if (n - cutStart - cutEnd < kSample)
+            continue;
+
+        std::vector<cv::Point> sample(contour.begin() + cutStart,
+                                      contour.end()   - cutEnd);
 
         cv::RotatedRect el = cv::fitEllipseAMS(sample);
 

@@ -32,12 +32,14 @@ struct BallDetectorConfig {
 };
 
 struct RansacConfig {
-    // Number of random minimal-sample iterations
+    // Number of iterations
     int    iterations      = 200;
     // Algebraic residual threshold below which a point counts as inlier
     double inlierThreshold = 0.05;
     // Minimum inliers required to accept a RANSAC model
     int    minInliers      = 8;
+    // Maximum fraction of contour points that may be cut from each end [0, 0.5)
+    double maxCutFraction  = 0.40;
 };
 
 // Returns all contours that are consistent with a ball of the configured shape.
