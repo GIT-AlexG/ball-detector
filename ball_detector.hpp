@@ -29,6 +29,10 @@ struct BallDetectorConfig {
     // brightness inside the fitted ellipse. Balls are smoother than backgrounds
     // with windows or texture. Set to 1.0 to disable.
     double maxInteriorCV   = 0.25;
+
+    // NMS: two ellipses are considered duplicates if their centers are closer
+    // than this fraction of their average major axis. Set to 0 to disable.
+    double nmsOverlapFraction = 0.5;
 };
 
 struct RansacConfig {
@@ -42,11 +46,27 @@ struct RansacConfig {
     double maxCutFraction  = 0.40;
 };
 
+// Optional focused search: re-runs contour detection inside a 1.5× enlarged
+// crop around the previous frame's ellipse, RANSAC-trims each found contour,
+// and merges the results with the global detection before NMS.
+struct FocusedSearchConfig {
+    bool         enabled       = false;
+    double       cropScale     = 1.5;  // half-axes multiplied by this for crop size
+    // Outer RANSAC: how many (cutStart, cutEnd) pairs to try per contour
+    int          trimIterations = 50;
+    RansacConfig ransac;                // inner ransacRefineEllipse config
+};
+
 // Returns all contours that are consistent with a ball of the configured shape.
 // Partial contours (arcs) are included if they fit an ellipse well.
+// If focusCfg.enabled and prevEllipse is non-null, additionally searches a
+// zoomed crop around the previous ellipse and merges those contours in.
+// NMS is applied before returning to suppress duplicates.
 std::vector<std::vector<cv::Point>> detectBallContours(
-    const cv::Mat& frame,
-    const BallDetectorConfig& cfg);
+    const cv::Mat&             frame,
+    const BallDetectorConfig&  cfg,
+    const FocusedSearchConfig& focusCfg    = {},
+    const cv::RotatedRect*     prevEllipse = nullptr);
 
 // RANSAC-based ellipse refinement: removes outlier points from a contour,
 // fits an ellipse to the inlier consensus set, and returns it.
