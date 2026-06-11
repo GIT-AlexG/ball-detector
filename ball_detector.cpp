@@ -91,6 +91,47 @@ static std::vector<std::vector<cv::Point>> applyNMS(
     return out;
 }
 
+// For a focused-search contour: outer RANSAC tries random endpoint cuts,
+// runs ransacRefineEllipse on each trimmed segment, keeps the result with
+// the most inliers. Returns an empty vector if no good fit is found.
+static std::vector<cv::Point> trimAndRefineContour(
+    const std::vector<cv::Point>& contour,
+    const FocusedSearchConfig&    focusCfg,
+    int                           minPoints)
+{
+    const int n = static_cast<int>(contour.size());
+    constexpr int kMin = 5;
+    if (n < kMin) return {};
+
+    std::mt19937 rng(42);
+    const int maxCut = static_cast<int>(n * focusCfg.ransac.maxCutFraction);
+    std::uniform_int_distribution<int> cutDist(0, std::max(0, maxCut));
+
+    int bestInlierCount = 0;
+    std::vector<cv::Point> bestInliers;
+
+    for (int iter = 0; iter < focusCfg.trimIterations; ++iter) {
+        // Random endpoint cuts anchored at the first / last contour point
+        int cutStart = cutDist(rng);
+        int cutEnd   = cutDist(rng);
+        if (n - cutStart - cutEnd < kMin) continue;
+
+        std::vector<cv::Point> trimmed(contour.begin() + cutStart,
+                                       contour.end()   - cutEnd);
+
+        std::vector<cv::Point> inliers;
+        ransacRefineEllipse(trimmed, focusCfg.ransac, inliers);
+
+        if (static_cast<int>(inliers.size()) > bestInlierCount) {
+            bestInlierCount = static_cast<int>(inliers.size());
+            bestInliers     = inliers;
+        }
+    }
+
+    if (bestInlierCount >= minPoints) return bestInliers;
+    return {};
+}
+
 std::vector<std::vector<cv::Point>> detectBallContours(
     const cv::Mat&             frame,
     const BallDetectorConfig&  cfg,
@@ -161,10 +202,11 @@ std::vector<std::vector<cv::Point>> detectBallContours(
 
         if (x1 > x0 && y1 > y0) {
             cv::Rect cropRect(x0, y0, x1 - x0, y1 - y0);
-            cv::Mat cropEdges = edges(cropRect);
+            cv::Mat cropEdges = edges(cropRect).clone();
 
             std::vector<std::vector<cv::Point>> cropContours;
-            cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
+            //cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
+            cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
 
             for (auto& fc : cropContours) {
                 if (static_cast<int>(fc.size()) < cfg.minContourPoints)
@@ -173,11 +215,11 @@ std::vector<std::vector<cv::Point>> detectBallContours(
                 // Translate crop-local coordinates back to full-image space
                 for (auto& p : fc) { p.x += x0; p.y += y0; }
 
-                // RANSAC end-cut trim
-                std::vector<cv::Point> inliers;
-                ransacRefineEllipse(fc, focusCfg.ransac, inliers);
-                if (static_cast<int>(inliers.size()) >= cfg.minContourPoints)
-                    result.push_back(std::move(inliers));
+                // Outer RANSAC: try random endpoint cuts, run ransacRefineEllipse
+                // on each trimmed segment, keep the inlier set with most support
+                auto refined = trimAndRefineContour(fc, focusCfg, cfg.minContourPoints);
+                if (!refined.empty())
+                    result.push_back(std::move(refined));
             }
         }
     }

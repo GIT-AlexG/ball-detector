@@ -50,9 +50,11 @@ struct RansacConfig {
 // crop around the previous frame's ellipse, RANSAC-trims each found contour,
 // and merges the results with the global detection before NMS.
 struct FocusedSearchConfig {
-    bool         enabled   = false;
-    double       cropScale = 1.5;   // half-axes multiplied by this for crop size
-    RansacConfig ransac;
+    bool         enabled       = false;
+    double       cropScale     = 1.5;  // half-axes multiplied by this for crop size
+    // Outer RANSAC: how many (cutStart, cutEnd) pairs to try per contour
+    int          trimIterations = 50;
+    RansacConfig ransac;                // inner ransacRefineEllipse config
 };
 
 // Returns all contours that are consistent with a ball of the configured shape.
