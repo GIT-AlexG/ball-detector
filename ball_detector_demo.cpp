@@ -6,6 +6,7 @@ int main(int argc, char* argv[]) {
     cv::Mat frame;
     cv::VideoCapture cap;
     bool liveMode = false;
+    cv::namedWindow("Ball Detector");
 
     if (argc > 1) {
         frame = cv::imread(argv[1]);
@@ -79,6 +80,7 @@ int main(int argc, char* argv[]) {
 
     if (!liveMode) {
         cv::Mat vis = processFrame(frame);
+        cv::Mat deb = vis;
         cv::imshow("Ball Detector", vis);
         cv::waitKey(0);
     } else {
@@ -91,28 +93,32 @@ int main(int argc, char* argv[]) {
 
         cv::Mat f;
         bool userSeeked = false;
+        // Tracks the slider value we last set programmatically so we can
+        // distinguish our own updates from user-initiated seeks.
+        int lastSetPos = 0;
 
         while (true) {
             if (isVideo) {
-                int currentFrame = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES));
-                // Detect if the user moved the slider
-                if (sliderPos != currentFrame) {
-                    cap.set(cv::CAP_PROP_POS_FRAMES, sliderPos);
+                int pos = cv::getTrackbarPos("Frame", "Ball Detector");
+                if (pos != lastSetPos) {
+                    cap.set(cv::CAP_PROP_POS_FRAMES, pos);
+                    lastSetPos = pos;
                     userSeeked = true;
                 }
             }
 
             if (!cap.read(f)) break;
 
-            if (isVideo)
-                sliderPos = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES)) - 1;
+            if (isVideo) {
+                lastSetPos = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES)) - 1;
+                cv::setTrackbarPos("Frame", "Ball Detector", lastSetPos);
+            }
 
             cv::Mat vis = processFrame(f);
             cv::imshow("Ball Detector", vis);
 
-            // Pause on seek so the user can inspect the frame; otherwise advance
-            int key = cv::waitKey(userSeeked ? 0 : 30);
             userSeeked = false;
+            int key = cv::waitKey(30);
             if (key == 27) break;                          // ESC: quit
             if (key == 32 && isVideo) cv::waitKey(0);      // Space: pause
         }
