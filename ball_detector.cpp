@@ -1,5 +1,8 @@
 #include "ball_detector.hpp"
+#include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <random>
 
 // Normalized algebraic residual of a point relative to a fitted ellipse.
 // Returns |( x'/a )^2 + ( y'/b )^2 - 1| where x', y' are point coordinates
@@ -103,4 +106,65 @@ std::vector<std::vector<cv::Point>> detectBallContours(
     }
 
     return result;
+}
+
+cv::RotatedRect ransacRefineEllipse(
+    const std::vector<cv::Point>& contour,
+    const RansacConfig& cfg,
+    std::vector<cv::Point>& inliers)
+{
+    const int n = static_cast<int>(contour.size());
+    constexpr int kSample = 5; // minimum points required by fitEllipseAMS
+
+    if (n < kSample) {
+        inliers = contour;
+        return cv::fitEllipseAMS(contour);
+    }
+
+    std::mt19937 rng(42);
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+
+    int bestCount = 0;
+    cv::RotatedRect bestEl;
+    std::vector<cv::Point> sample(kSample);
+
+    for (int iter = 0; iter < cfg.iterations; ++iter) {
+        // Draw kSample distinct random points (partial Fisher–Yates)
+        for (int i = 0; i < kSample; ++i) {
+            std::uniform_int_distribution<int> dist(i, n - 1);
+            std::swap(idx[i], idx[dist(rng)]);
+            sample[i] = contour[idx[i]];
+        }
+
+        cv::RotatedRect el = cv::fitEllipseAMS(sample);
+
+        // Count how many contour points lie within the inlier threshold
+        int count = 0;
+        for (const auto& p : contour)
+            if (ellipseResidual(cv::Point2f(static_cast<float>(p.x),
+                                            static_cast<float>(p.y)), el)
+                    < cfg.inlierThreshold)
+                ++count;
+
+        if (count > bestCount) {
+            bestCount = count;
+            bestEl    = el;
+        }
+    }
+
+    // Collect inliers for best model and refit
+    inliers.clear();
+    for (const auto& p : contour)
+        if (ellipseResidual(cv::Point2f(static_cast<float>(p.x),
+                                        static_cast<float>(p.y)), bestEl)
+                < cfg.inlierThreshold)
+            inliers.push_back(p);
+
+    if (static_cast<int>(inliers.size()) >= cfg.minInliers)
+        return cv::fitEllipseAMS(inliers);
+
+    // Fallback: not enough inliers, return original fit
+    inliers = contour;
+    return cv::fitEllipseAMS(contour);
 }

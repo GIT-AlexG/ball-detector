@@ -9,7 +9,7 @@ int main(int argc, char* argv[]) {
 
     if (argc > 1) {
         frame = cv::imread(argv[1]);
-        frame = frame(cv::Rect(0, 0, 1498, 1200));
+        //frame = frame(cv::Rect(0, 0, 1498, 1200));
         if (frame.empty()) {
             // Try as video
             cap.open(argv[1]);
@@ -30,6 +30,7 @@ int main(int argc, char* argv[]) {
 
     // --- Configuration ---
     BallDetectorConfig cfg;
+    RansacConfig ransacCfg;
     cfg.minRadius       = 15.0;
     cfg.maxRadius       = 200.0;
     cfg.minAxisRatio    = 0.45;
@@ -46,16 +47,30 @@ int main(int argc, char* argv[]) {
         cv::drawContours(vis, contours, -1, {0, 255, 0}, 2);
 
         for (const auto& c : contours) {
-            if (c.size() >= 5) {
-                cv::RotatedRect el = cv::fitEllipseAMS(c);
-                cv::ellipse(vis, el, {0, 0, 255}, 2);
-                // Label with axis ratio
-                float major = std::max(el.size.width, el.size.height) * 0.5f;
-                float minor = std::min(el.size.width, el.size.height) * 0.5f;
-                std::string label = cv::format("%.2f", minor / major);
-                cv::putText(vis, label, el.center, cv::FONT_HERSHEY_SIMPLEX,
-                            0.5, {255, 255, 0}, 1);
-            }
+            if (c.size() < 5) continue;
+
+            // Initial ellipse fit (red)
+            cv::RotatedRect el = cv::fitEllipseAMS(c);
+            cv::ellipse(vis, el, {0, 0, 255}, 2);
+
+            // RANSAC-refined ellipse (cyan), inliers as small dots (yellow)
+            std::vector<cv::Point> inliers;
+            cv::RotatedRect elRansac = ransacRefineEllipse(c, ransacCfg, inliers);
+            cv::ellipse(vis, elRansac, {255, 255, 0}, 2);
+            for (const auto& p : inliers)
+                cv::circle(vis, p, 2, {0, 255, 255}, -1);
+
+            // Label: axis ratio / inlier count
+            float major = std::max(elRansac.size.width, elRansac.size.height) * 0.5f;
+            float minor = std::min(elRansac.size.width, elRansac.size.height) * 0.5f;
+            std::string label = cv::format("%.2f  %d/%d",
+                                           minor / major,
+                                           static_cast<int>(inliers.size()),
+                                           static_cast<int>(c.size()));
+            cv::putText(vis, label,
+                        cv::Point(static_cast<int>(elRansac.center.x),
+                                  static_cast<int>(elRansac.center.y)),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, {255, 255, 255}, 1);
         }
 
         std::cout << "Detected " << contours.size() << " contour(s)\n";

@@ -31,8 +31,25 @@ struct BallDetectorConfig {
     double maxInteriorCV   = 0.25;
 };
 
+struct RansacConfig {
+    // Number of random minimal-sample iterations
+    int    iterations      = 200;
+    // Algebraic residual threshold below which a point counts as inlier
+    double inlierThreshold = 0.05;
+    // Minimum inliers required to accept a RANSAC model
+    int    minInliers      = 8;
+};
+
 // Returns all contours that are consistent with a ball of the configured shape.
 // Partial contours (arcs) are included if they fit an ellipse well.
 std::vector<std::vector<cv::Point>> detectBallContours(
     const cv::Mat& frame,
     const BallDetectorConfig& cfg);
+
+// RANSAC-based ellipse refinement: removes outlier points from a contour,
+// fits an ellipse to the inlier consensus set, and returns it.
+// inliers is filled with the subset of contour points that support the model.
+cv::RotatedRect ransacRefineEllipse(
+    const std::vector<cv::Point>& contour,
+    const RansacConfig& cfg,
+    std::vector<cv::Point>& inliers);
