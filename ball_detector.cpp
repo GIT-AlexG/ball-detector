@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <unordered_map>
+#include <unordered_set>
 
 // Normalized algebraic residual of a point relative to a fitted ellipse.
 // Returns |( x'/a )^2 + ( y'/b )^2 - 1| where x', y' are point coordinates
@@ -91,31 +93,76 @@ static std::vector<std::vector<cv::Point>> applyNMS(
     return out;
 }
 
-// Rotates an open contour so its geometric endpoints sit at index 0 and n-1.
-// Finds the largest gap between consecutive points (including the wrap-around);
-// that gap marks the break in the open arc. The point after the gap becomes index 0.
+// Reconstructs an open contour as a connected chain with arc endpoints at
+// index 0 and n-1. Works on unordered point sets by:
+//   1. Building an 8-connectivity lookup from the point set.
+//   2. Finding an endpoint: a point with exactly one 8-neighbor in the set.
+//      Falls back to contour[0] for closed or degenerate contours.
+//   3. Greedily traversing from that endpoint to reconstruct the chain.
+// Points not reachable via 8-connectivity are appended at the end so the
+// returned vector always contains all input points.
 static std::vector<cv::Point> reorderOpenContour(const std::vector<cv::Point>& contour)
 {
     const int n = static_cast<int>(contour.size());
     if (n < 2) return contour;
 
-    int splitIdx = 0;
-    float maxGapSq = 0.f;
-    for (int i = 0; i < n; ++i) {
-        const cv::Point& a = contour[i];
-        const cv::Point& b = contour[(i + 1) % n];
-        float dx = static_cast<float>(b.x - a.x);
-        float dy = static_cast<float>(b.y - a.y);
-        float dSq = dx * dx + dy * dy;
-        if (dSq > maxGapSq) { maxGapSq = dSq; splitIdx = i; }
+    // Build point set for O(1) neighbour lookup
+    std::unordered_map<int, std::unordered_set<int>> ptSet;
+    ptSet.reserve(n);
+    for (const auto& p : contour)
+        ptSet[p.y].insert(p.x);
+
+    auto hasPoint = [&](int x, int y) {
+        auto row = ptSet.find(y);
+        return row != ptSet.end() && row->second.count(x);
+    };
+
+    auto neighborCount = [&](const cv::Point& p) {
+        int cnt = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if ((dx || dy) && hasPoint(p.x + dx, p.y + dy)) ++cnt;
+        return cnt;
+    };
+
+    // Find an endpoint (exactly one 8-neighbour); fall back to contour[0]
+    cv::Point start = contour[0];
+    for (const auto& p : contour) {
+        if (neighborCount(p) == 1) { start = p; break; }
     }
 
-    // Rotate so the point after the largest gap becomes index 0
-    int start = (splitIdx + 1) % n;
+    // Greedy chain traversal
+    std::unordered_map<int, std::unordered_set<int>> visited;
     std::vector<cv::Point> ordered;
     ordered.reserve(n);
-    for (int i = 0; i < n; ++i)
-        ordered.push_back(contour[(start + i) % n]);
+
+    cv::Point cur = start;
+    while (true) {
+        ordered.push_back(cur);
+        visited[cur.y].insert(cur.x);
+
+        cv::Point next(-1, -1);
+        for (int dy = -1; dy <= 1 && next.x < 0; ++dy)
+            for (int dx = -1; dx <= 1 && next.x < 0; ++dx)
+                if ((dx || dy) && hasPoint(cur.x + dx, cur.y + dy)) {
+                    auto vrow = visited.find(cur.y + dy);
+                    if (vrow == visited.end() || !vrow->second.count(cur.x + dx))
+                        next = {cur.x + dx, cur.y + dy};
+                }
+
+        if (next.x < 0) break;
+        cur = next;
+    }
+
+    // Append any points not reached via connectivity (gaps in the edge image)
+    if (static_cast<int>(ordered.size()) < n) {
+        for (const auto& p : contour) {
+            auto vrow = visited.find(p.y);
+            if (vrow == visited.end() || !vrow->second.count(p.x))
+                ordered.push_back(p);
+        }
+    }
+
     return ordered;
 }
 
