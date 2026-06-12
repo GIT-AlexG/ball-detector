@@ -284,8 +284,8 @@ std::vector<std::vector<cv::Point>> detectBallContours(
             cv::Mat cropEdges = edges(cropRect).clone();
 
             std::vector<std::vector<cv::Point>> cropContours;
-            //cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
-            cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
+            cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
+            //cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
 
             for (auto& fc : cropContours) {
                 if (static_cast<int>(fc.size()) < cfg.minContourPoints)
