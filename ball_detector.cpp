@@ -2,8 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <queue>
 #include <unordered_map>
-#include <unordered_set>
 
 // Normalized algebraic residual of a point relative to a fitted ellipse.
 // Returns |( x'/a )^2 + ( y'/b )^2 - 1| where x', y' are point coordinates
@@ -93,77 +93,81 @@ static std::vector<std::vector<cv::Point>> applyNMS(
     return out;
 }
 
-// Reconstructs an open contour as a connected chain with arc endpoints at
-// index 0 and n-1. Works on unordered point sets by:
-//   1. Building an 8-connectivity lookup from the point set.
-//   2. Finding an endpoint: a point with exactly one 8-neighbor in the set.
-//      Falls back to contour[0] for closed or degenerate contours.
-//   3. Greedily traversing from that endpoint to reconstruct the chain.
-// Points not reachable via 8-connectivity are appended at the end so the
-// returned vector always contains all input points.
+// Reorders an open contour so its arc endpoints sit at index 0 and n-1,
+// even when the input points are unordered.
+//
+// Algorithm (double-BFS / graph-diameter technique):
+//   1. Draw contour pixels onto a small binary image.
+//   2. BFS from contour[0] over white pixels (8-conn.) — the last pixel
+//      reached is a geometric endpoint of the arc.
+//   3. BFS again from that endpoint, recording the BFS distance to every
+//      contour pixel.
+//   4. Sort the original contour points by ascending BFS distance.
+//      Points with equal distance keep their relative order (stable_sort).
 static std::vector<cv::Point> reorderOpenContour(const std::vector<cv::Point>& contour)
 {
     const int n = static_cast<int>(contour.size());
     if (n < 2) return contour;
 
-    // Build point set for O(1) neighbour lookup
-    std::unordered_map<int, std::unordered_set<int>> ptSet;
-    ptSet.reserve(n);
+    // --- Build a small binary image (bounding box + 1px border) ---
+    cv::Rect bbox = cv::boundingRect(contour);
+    bbox.x -= 1; bbox.y -= 1; bbox.width += 2; bbox.height += 2;
+
+    cv::Mat img = cv::Mat::zeros(bbox.height, bbox.width, CV_8U);
     for (const auto& p : contour)
-        ptSet[p.y].insert(p.x);
+        img.at<uchar>(p.y - bbox.y, p.x - bbox.x) = 255;
 
-    auto hasPoint = [&](int x, int y) {
-        auto row = ptSet.find(y);
-        return row != ptSet.end() && row->second.count(x);
-    };
-
-    auto neighborCount = [&](const cv::Point& p) {
-        int cnt = 0;
-        for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx)
-                if ((dx || dy) && hasPoint(p.x + dx, p.y + dy)) ++cnt;
-        return cnt;
-    };
-
-    // Find an endpoint (exactly one 8-neighbour); fall back to contour[0]
-    cv::Point start = contour[0];
-    for (const auto& p : contour) {
-        if (neighborCount(p) == 1) { start = p; break; }
-    }
-
-    // Greedy chain traversal
-    std::unordered_map<int, std::unordered_set<int>> visited;
-    std::vector<cv::Point> ordered;
-    ordered.reserve(n);
-
-    cv::Point cur = start;
-    while (true) {
-        ordered.push_back(cur);
-        visited[cur.y].insert(cur.x);
-
-        cv::Point next(-1, -1);
-        for (int dy = -1; dy <= 1 && next.x < 0; ++dy)
-            for (int dx = -1; dx <= 1 && next.x < 0; ++dx)
-                if ((dx || dy) && hasPoint(cur.x + dx, cur.y + dy)) {
-                    auto vrow = visited.find(cur.y + dy);
-                    if (vrow == visited.end() || !vrow->second.count(cur.x + dx))
-                        next = {cur.x + dx, cur.y + dy};
+    // --- 8-connected BFS returning a distance map (unreached = -1) ---
+    auto bfs = [&](cv::Point seed) -> cv::Mat {
+        cv::Mat dist(bbox.height, bbox.width, CV_32S, cv::Scalar(-1));
+        cv::Point s(seed.x - bbox.x, seed.y - bbox.y);
+        if (img.at<uchar>(s) == 0) return dist;
+        dist.at<int>(s) = 0;
+        std::queue<cv::Point> q;
+        q.push(s);
+        while (!q.empty()) {
+            cv::Point cur = q.front(); q.pop();
+            int d = dist.at<int>(cur) + 1;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (!dx && !dy) continue;
+                    cv::Point nb(cur.x + dx, cur.y + dy);
+                    if (nb.x < 0 || nb.y < 0 ||
+                        nb.x >= bbox.width || nb.y >= bbox.height) continue;
+                    if (img.at<uchar>(nb) == 0) continue;
+                    if (dist.at<int>(nb) >= 0) continue;
+                    dist.at<int>(nb) = d;
+                    q.push(nb);
                 }
-
-        if (next.x < 0) break;
-        cur = next;
-    }
-
-    // Append any points not reached via connectivity (gaps in the edge image)
-    if (static_cast<int>(ordered.size()) < n) {
-        for (const auto& p : contour) {
-            auto vrow = visited.find(p.y);
-            if (vrow == visited.end() || !vrow->second.count(p.x))
-                ordered.push_back(p);
+            }
         }
+        return dist;
+    };
+
+    // --- First BFS: find farthest point from contour[0] = one endpoint ---
+    cv::Mat dist1 = bfs(contour[0]);
+    cv::Point endpoint = contour[0];
+    int maxD = 0;
+    for (const auto& p : contour) {
+        int d = dist1.at<int>(p.y - bbox.y, p.x - bbox.x);
+        if (d > maxD) { maxD = d; endpoint = p; }
     }
 
-    return ordered;
+    // --- Second BFS from endpoint: distance = arc-length order ---
+    cv::Mat dist2 = bfs(endpoint);
+
+    // --- Sort contour points by ascending BFS distance ---
+    std::vector<cv::Point> sorted = contour;
+    std::stable_sort(sorted.begin(), sorted.end(),
+        [&](const cv::Point& a, const cv::Point& b) {
+            int da = dist2.at<int>(a.y - bbox.y, a.x - bbox.x);
+            int db = dist2.at<int>(b.y - bbox.y, b.x - bbox.x);
+            if (da < 0) da = INT_MAX; // unreachable → append at end
+            if (db < 0) db = INT_MAX;
+            return da < db;
+        });
+
+    return sorted;
 }
 
 // For a focused-search contour: outer RANSAC tries random endpoint cuts,
@@ -292,6 +296,15 @@ std::vector<std::vector<cv::Point>> detectBallContours(
 
                 // Rotate so geometric arc endpoints are at index 0 and n-1
                 fc = reorderOpenContour(fc);
+
+                std::vector<float> dists;
+                for (int i = 0; i < fc.size(); i++)
+                {
+                    cv::Point p1 = fc[i];
+                    cv::Point p2 = fc[(i + 1) % (fc.size() - 1)];
+                    float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y);
+                    dists.push_back(d);
+                }
 
                 // Outer RANSAC: try random endpoint cuts, run ransacRefineEllipse
                 // on each trimmed segment, keep the inlier set with most support
