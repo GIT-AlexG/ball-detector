@@ -150,15 +150,16 @@ int main(int argc, char* argv[]) {
         }
 
         // --- Update prevEllipse for next frame ---
+        // If a contour was found, update with the precise fit.
+        // Otherwise keep all parameters from the previous frame unchanged
+        // so the next frame's search stays anchored at the last known position.
         if (!contours.empty() && contours[0].size() >= 5) {
             prevEllipse    = cv::fitEllipseAMS(contours[0]);
             hasPrevEllipse = true;
         } else if (tmplMatchCenter.x >= 0) {
-            // Template matched but contours failed: keep match position as anchor
-            hasPrevEllipse = true;
-        } else {
-            hasPrevEllipse = false;
+            hasPrevEllipse = true; // prevEllipse.center already updated by template match
         }
+        // else: hasPrevEllipse and prevEllipse remain as-is
 
         // --- Visualisation ---
         cv::Mat vis = img.clone();
