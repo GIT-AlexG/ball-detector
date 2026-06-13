@@ -211,6 +211,36 @@ static std::vector<cv::Point> trimAndRefineContour(
     return {};
 }
 
+// Returns true if a contour's fitted ellipse passes all shape/quality filters.
+static bool passesEllipseFilters(const std::vector<cv::Point>& contour,
+                                 const cv::RotatedRect&        el,
+                                 const cv::Mat&                gray,
+                                 const BallDetectorConfig&     cfg)
+{
+    float majorAxis = std::max(el.size.width, el.size.height) * 0.5f;
+    float minorAxis = std::min(el.size.width, el.size.height) * 0.5f;
+
+    // Size
+    if (majorAxis < cfg.minRadius || majorAxis > cfg.maxRadius) return false;
+
+    // Axis ratio: rejects lines and highly elongated shapes
+    double axisRatio = (majorAxis > 0) ? (minorAxis / majorAxis) : 0.0;
+    if (axisRatio < cfg.minAxisRatio || axisRatio > cfg.maxAxisRatio) return false;
+
+    // Area
+    double area = CV_PI * majorAxis * minorAxis;
+    if (area < cfg.minEllipseArea || area > cfg.maxEllipseArea) return false;
+
+    // Fit quality
+    if (meanResidual(contour, el) > cfg.maxFitResidual) return false;
+
+    // Interior uniformity
+    if (cfg.maxInteriorCV < 1.0 && interiorCV(gray, el) > cfg.maxInteriorCV)
+        return false;
+
+    return true;
+}
+
 std::vector<std::vector<cv::Point>> detectBallContours(
     const cv::Mat&             frame,
     const BallDetectorConfig&  cfg,
@@ -243,34 +273,9 @@ std::vector<std::vector<cv::Point>> detectBallContours(
         // 4. Fit ellipse (AMS is more robust to noise than the basic DLS fit)
         cv::RotatedRect el = cv::fitEllipseAMS(contour);
 
-        float majorAxis = std::max(el.size.width, el.size.height) * 0.5f;
-        float minorAxis = std::min(el.size.width, el.size.height) * 0.5f;
-
-        // 5a. Size filter
-        if (majorAxis < cfg.minRadius || majorAxis > cfg.maxRadius)
+        // 5. Shape / quality filters
+        if (!passesEllipseFilters(contour, el, gray, cfg))
             continue;
-
-        // 5b. Axis ratio filter: rejects lines and highly elongated shapes
-        double axisRatio = (majorAxis > 0) ? (minorAxis / majorAxis) : 0.0;
-        if (axisRatio < cfg.minAxisRatio || axisRatio > cfg.maxAxisRatio)
-            continue;
-
-        // 5c. Area filter: π * a * b must fall within [minEllipseArea, maxEllipseArea]
-        double area = CV_PI * majorAxis * minorAxis;
-        if (area < cfg.minEllipseArea || area > cfg.maxEllipseArea)
-            continue;
-
-        // 5e. Ellipse fit quality: contour points must lie close to the ellipse
-        double residual = meanResidual(contour, el);
-        if (residual > cfg.maxFitResidual)
-            continue;
-
-        // 5f. Interior uniformity: ball surface is smoother than structured backgrounds
-        if (cfg.maxInteriorCV < 1.0) {
-            double cv = interiorCV(gray, el);
-            if (cv > cfg.maxInteriorCV)
-                continue;
-        }
 
         result.push_back(std::move(contour));
     }
@@ -299,31 +304,19 @@ std::vector<std::vector<cv::Point>> detectBallContours(
                 // Translate crop-local coordinates back to full-image space
                 for (auto& p : fc) { p.x += x0; p.y += y0; }
 
-                cv::Mat img = cv::Mat::zeros(frame.rows, frame.cols, CV_8U);
-                for (const auto& p : fc)
-                    img.at<uchar>(p.y, p.x) = 255;
-
-                cv::Mat img2 = cv::Mat::zeros(frame.rows, frame.cols, CV_8U);
-                cv::drawContours(img2, fc, 0, cv::Scalar(255));
-
-                std::vector<float> dists;
-                for (int i = 0; i < fc.size(); i++)
-                {
-                    cv::Point p1 = fc[i];
-                    cv::Point p2 = fc[(i + 1) % (fc.size() - 1)];
-                    float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y);
-                    dists.push_back(d);
-                }
-
                 // Rotate so geometric arc endpoints are at index 0 and n-1
                 fc = reorderOpenContour(fc);
-
-                
 
                 // Outer RANSAC: try random endpoint cuts, run ransacRefineEllipse
                 // on each trimmed segment, keep the inlier set with most support
                 auto refined = trimAndRefineContour(fc, focusCfg, cfg.minContourPoints);
-                if (!refined.empty())
+                if (refined.empty())
+                    continue;
+
+                // Apply the same shape/quality filters as the global search so
+                // degenerate ellipses (e.g. thin 1xN lines) cannot slip through
+                cv::RotatedRect rel = cv::fitEllipseAMS(refined);
+                if (passesEllipseFilters(refined, rel, gray, cfg))
                     result.push_back(std::move(refined));
             }
         }
