@@ -255,12 +255,17 @@ std::vector<std::vector<cv::Point>> detectBallContours(
         if (axisRatio < cfg.minAxisRatio || axisRatio > cfg.maxAxisRatio)
             continue;
 
-        // 5c. Ellipse fit quality: contour points must lie close to the ellipse
+        // 5c. Area filter: π * a * b must fall within [minEllipseArea, maxEllipseArea]
+        double area = CV_PI * majorAxis * minorAxis;
+        if (area < cfg.minEllipseArea || area > cfg.maxEllipseArea)
+            continue;
+
+        // 5e. Ellipse fit quality: contour points must lie close to the ellipse
         double residual = meanResidual(contour, el);
         if (residual > cfg.maxFitResidual)
             continue;
 
-        // 5d. Interior uniformity: ball surface is smoother than structured backgrounds
+        // 5f. Interior uniformity: ball surface is smoother than structured backgrounds
         if (cfg.maxInteriorCV < 1.0) {
             double cv = interiorCV(gray, el);
             if (cv > cfg.maxInteriorCV)
@@ -294,8 +299,12 @@ std::vector<std::vector<cv::Point>> detectBallContours(
                 // Translate crop-local coordinates back to full-image space
                 for (auto& p : fc) { p.x += x0; p.y += y0; }
 
-                // Rotate so geometric arc endpoints are at index 0 and n-1
-                fc = reorderOpenContour(fc);
+                cv::Mat img = cv::Mat::zeros(frame.rows, frame.cols, CV_8U);
+                for (const auto& p : fc)
+                    img.at<uchar>(p.y, p.x) = 255;
+
+                cv::Mat img2 = cv::Mat::zeros(frame.rows, frame.cols, CV_8U);
+                cv::drawContours(img2, fc, 0, cv::Scalar(255));
 
                 std::vector<float> dists;
                 for (int i = 0; i < fc.size(); i++)
@@ -305,6 +314,11 @@ std::vector<std::vector<cv::Point>> detectBallContours(
                     float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y);
                     dists.push_back(d);
                 }
+
+                // Rotate so geometric arc endpoints are at index 0 and n-1
+                fc = reorderOpenContour(fc);
+
+                
 
                 // Outer RANSAC: try random endpoint cuts, run ransacRefineEllipse
                 // on each trimmed segment, keep the inlier set with most support

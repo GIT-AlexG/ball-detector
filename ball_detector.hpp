@@ -8,6 +8,10 @@ struct BallDetectorConfig {
     double minRadius = 15.0;
     double maxRadius = 200.0;
 
+    // Ellipse area filter (π * a * b). Rejects ellipses outside this pixel range.
+    double minEllipseArea = 900.0;
+    double maxEllipseArea = 10000.0;
+
     // Ellipse axis ratio (minor/major): reject if major > 1.3 * minor (i.e. ratio < 1/1.3)
     double minAxisRatio = 1.0 / 1.3;
     double maxAxisRatio = 1.0;
