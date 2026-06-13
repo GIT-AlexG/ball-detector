@@ -59,10 +59,13 @@ struct FocusedSearchConfig {
 
 struct TemplateConfig {
     bool   enabled        = false;
-    // Search region radius as a multiple of the template's half-size
+    // Template-match search region radius as a multiple of the template's half-size
     double searchScale    = 2.5;
     // Minimum TM_CCOEFF_NORMED score to accept a template match
     double matchThreshold = 0.5;
+    // After a successful match, restrict ALL detection to this multiple of the
+    // ellipse's half-axes around the match center
+    double roiScale       = 3.0;
 };
 
 // Returns all contours that are consistent with a ball of the configured shape.

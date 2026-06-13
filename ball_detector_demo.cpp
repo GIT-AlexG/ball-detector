@@ -63,11 +63,10 @@ int main(int argc, char* argv[]) {
     bool    hasTemplate = false;
 
     auto processFrame = [&](const cv::Mat& img) {
-        // Grayscale needed for template creation and matching
         cv::Mat gray;
         cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
 
-        // --- Template matching: update prevEllipse position before focused search ---
+        // --- Template matching: update prevEllipse before detection ---
         cv::Point2f tmplMatchCenter(-1.f, -1.f);
         float       tmplMatchScore = 0.f;
 
@@ -84,13 +83,12 @@ int main(int argc, char* argv[]) {
                 cv::Mat matchResult;
                 cv::matchTemplate(searchRegion, ellipseTemplate, matchResult, cv::TM_CCOEFF_NORMED);
 
-                double   maxVal;
+                double    maxVal;
                 cv::Point maxLoc;
                 cv::minMaxLoc(matchResult, nullptr, &maxVal, nullptr, &maxLoc);
                 tmplMatchScore = static_cast<float>(maxVal);
 
                 if (maxVal >= tmplCfg.matchThreshold) {
-                    // Shift prevEllipse center to match position for focused search
                     prevEllipse.center.x = sx0 + maxLoc.x + ellipseTemplate.cols * 0.5f;
                     prevEllipse.center.y = sy0 + maxLoc.y + ellipseTemplate.rows * 0.5f;
                     tmplMatchCenter = prevEllipse.center;
@@ -98,15 +96,41 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // --- Contour-based detection (focused search uses updated prevEllipse) ---
-        const cv::RotatedRect* prevPtr = hasPrevEllipse ? &prevEllipse : nullptr;
-        auto contours = detectBallContours(img, cfg, focusCfg, prevPtr);
+        // --- Restrict detection to ROI when template match succeeded ---
+        // Full frame by default; shrinks to ellipse neighbourhood on match.
+        cv::Rect searchROI(0, 0, img.cols, img.rows);
+        if (tmplCfg.enabled && tmplMatchCenter.x >= 0) {
+            float halfW = prevEllipse.size.width  * 0.5f * static_cast<float>(tmplCfg.roiScale);
+            float halfH = prevEllipse.size.height * 0.5f * static_cast<float>(tmplCfg.roiScale);
+            int rx0 = std::max(0,         static_cast<int>(prevEllipse.center.x - halfW));
+            int ry0 = std::max(0,         static_cast<int>(prevEllipse.center.y - halfH));
+            int rx1 = std::min(img.cols,  static_cast<int>(prevEllipse.center.x + halfW));
+            int ry1 = std::min(img.rows,  static_cast<int>(prevEllipse.center.y + halfH));
+            if (rx1 > rx0 && ry1 > ry0)
+                searchROI = cv::Rect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        }
+
+        // Translate prevEllipse to ROI-local coords for focused search inside crop
+        cv::RotatedRect prevEllipseLocal = prevEllipse;
+        prevEllipseLocal.center.x -= searchROI.x;
+        prevEllipseLocal.center.y -= searchROI.y;
+        const cv::RotatedRect* prevPtr =
+            hasPrevEllipse ? &prevEllipseLocal : nullptr;
+
+        // Run contour detection on the (possibly cropped) frame
+        cv::Mat roiFrame = img(searchROI);
+        auto contours = detectBallContours(roiFrame, cfg, focusCfg, prevPtr);
+
+        // Translate contour points back to full-image coordinates
+        for (auto& c : contours)
+            for (auto& p : c)
+                p += cv::Point(searchROI.x, searchROI.y);
 
         // --- Create template from first detection ---
         if (tmplCfg.enabled && !hasTemplate && !contours.empty() && contours[0].size() >= 5) {
             cv::RotatedRect bestEl   = cv::fitEllipseAMS(contours[0]);
             cv::Rect        tmplRect = bestEl.boundingRect();
-            tmplRect &= cv::Rect(0, 0, gray.cols, gray.rows); // clamp to image
+            tmplRect &= cv::Rect(0, 0, gray.cols, gray.rows);
             if (tmplRect.width > 0 && tmplRect.height > 0) {
                 ellipseTemplate = gray(tmplRect).clone();
                 hasTemplate     = true;
@@ -120,26 +144,27 @@ int main(int argc, char* argv[]) {
             prevEllipse    = cv::fitEllipseAMS(contours[0]);
             hasPrevEllipse = true;
         } else if (tmplMatchCenter.x >= 0) {
-            // Template matched but contour detection failed —
-            // keep template position so focused search can try again next frame
+            // Template matched but contours failed: keep match position as anchor
             hasPrevEllipse = true;
-            // prevEllipse.center already set to tmplMatchCenter above
         } else {
             hasPrevEllipse = false;
         }
 
         // --- Visualisation ---
         cv::Mat vis = img.clone();
+
+        // Active search ROI (blue rectangle, only when restricted)
+        if (tmplCfg.enabled && searchROI != cv::Rect(0, 0, img.cols, img.rows))
+            cv::rectangle(vis, searchROI, {255, 80, 0}, 1);
+
         cv::drawContours(vis, contours, -1, {0, 255, 0}, 2);
 
         for (const auto& c : contours) {
             if (c.size() < 5) continue;
 
-            // Initial ellipse fit (red)
             cv::RotatedRect el = cv::fitEllipseAMS(c);
             cv::ellipse(vis, el, {0, 0, 255}, 2);
 
-            // RANSAC-refined ellipse (cyan), inliers as small dots (yellow)
             std::vector<cv::Point> inliers;
             cv::RotatedRect elRansac = ransacRefineEllipse(c, ransacCfg, inliers);
             cv::ellipse(vis, elRansac, {255, 255, 0}, 2);
@@ -158,7 +183,7 @@ int main(int argc, char* argv[]) {
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, {255, 255, 255}, 1);
         }
 
-        // Template match indicator (orange)
+        // Template match indicator (orange circle + score)
         if (tmplMatchCenter.x >= 0) {
             cv::Point center(static_cast<int>(tmplMatchCenter.x),
                              static_cast<int>(tmplMatchCenter.y));
@@ -195,8 +220,7 @@ int main(int argc, char* argv[]) {
                 if (pos != lastSetPos) {
                     cap.set(cv::CAP_PROP_POS_FRAMES, pos);
                     lastSetPos     = pos;
-                    hasPrevEllipse = false; // position unknown after seek
-                    // hasTemplate stays: appearance of ball is still valid
+                    hasPrevEllipse = false;
                 }
             }
 
