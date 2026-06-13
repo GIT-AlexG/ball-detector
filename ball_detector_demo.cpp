@@ -149,6 +149,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Show current template in a separate window
+        if (tmplCfg.enabled && hasTemplate)
+            cv::imshow("Template", ellipseTemplate);
+
         // --- Update prevEllipse for next frame ---
         // If a contour was found, update with the precise fit.
         // Otherwise keep all parameters from the previous frame unchanged
