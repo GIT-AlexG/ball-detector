@@ -126,16 +126,26 @@ int main(int argc, char* argv[]) {
             for (auto& p : c)
                 p += cv::Point(searchROI.x, searchROI.y);
 
-        // --- Create template from first detection ---
-        if (tmplCfg.enabled && !hasTemplate && !contours.empty() && contours[0].size() >= 5) {
+        // --- Create / update template from detection ---
+        if (tmplCfg.enabled && !contours.empty() && contours[0].size() >= 5) {
             cv::RotatedRect bestEl   = cv::fitEllipseAMS(contours[0]);
             cv::Rect        tmplRect = bestEl.boundingRect();
             tmplRect &= cv::Rect(0, 0, gray.cols, gray.rows);
             if (tmplRect.width > 0 && tmplRect.height > 0) {
-                ellipseTemplate = gray(tmplRect).clone();
-                hasTemplate     = true;
-                std::cout << "Template created: "
-                          << tmplRect.width << "x" << tmplRect.height << " px\n";
+                cv::Mat newPatch = gray(tmplRect);
+                if (!hasTemplate) {
+                    ellipseTemplate = newPatch.clone();
+                    hasTemplate     = true;
+                    std::cout << "Template created: "
+                              << tmplRect.width << "x" << tmplRect.height << " px\n";
+                } else {
+                    // Weighted update: 70 % new patch, 30 % existing template
+                    cv::Mat newPatchResized;
+                    cv::resize(newPatch, newPatchResized, ellipseTemplate.size());
+                    cv::addWeighted(newPatchResized, 0.7,
+                                    ellipseTemplate,  0.3,
+                                    0.0, ellipseTemplate);
+                }
             }
         }
 
