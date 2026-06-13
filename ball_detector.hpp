@@ -8,8 +8,12 @@ struct BallDetectorConfig {
     double minRadius = 15.0;
     double maxRadius = 200.0;
 
-    // Ellipse axis ratio (minor/major): reject if major > 1.2 * minor (i.e. ratio < 1/1.2)
-    double minAxisRatio = 1.0 / 1.2;
+    // Ellipse area filter (π * a * b). Rejects ellipses outside this pixel range.
+    double minEllipseArea = 900.0;
+    double maxEllipseArea = 10000.0;
+
+    // Ellipse axis ratio (minor/major): reject if major > 1.3 * minor (i.e. ratio < 1/1.3)
+    double minAxisRatio = 1.0 / 1.3;
     double maxAxisRatio = 1.0;
 
     // Edge detection
@@ -55,6 +59,17 @@ struct FocusedSearchConfig {
     // Outer RANSAC: how many (cutStart, cutEnd) pairs to try per contour
     int          trimIterations = 50;
     RansacConfig ransac;                // inner ransacRefineEllipse config
+};
+
+struct TemplateConfig {
+    bool   enabled        = false;
+    // Template-match search region radius as a multiple of the template's half-size
+    double searchScale    = 2.5;
+    // Minimum TM_CCOEFF_NORMED score to accept a template match
+    double matchThreshold = 0.5;
+    // After a successful match, restrict ALL detection to this multiple of the
+    // ellipse's half-axes around the match center
+    double roiScale       = 3.0;
 };
 
 // Returns all contours that are consistent with a ball of the configured shape.
