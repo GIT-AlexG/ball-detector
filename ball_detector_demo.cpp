@@ -1,5 +1,6 @@
 #include "ball_detector.hpp"
 #include <iostream>
+#include <limits>
 
 int main(int argc, char* argv[]) {
     // --- Parse flags ---
@@ -126,9 +127,31 @@ int main(int argc, char* argv[]) {
             for (auto& p : c)
                 p += cv::Point(searchROI.x, searchROI.y);
 
-        // --- Create / update template from detection ---
-        if (tmplCfg.enabled && !contours.empty() && contours[0].size() >= 5) {
-            cv::RotatedRect bestEl   = cv::fitEllipseAMS(contours[0]);
+        // --- Select the best contour ---
+        // When a template match exists, pick the contour whose ellipse center is
+        // closest to the match position (avoids snapping onto larger spurious
+        // contours). Otherwise fall back to contours[0] (largest after NMS).
+        int bestIdx = -1;
+        {
+            cv::Point2f anchor = (tmplMatchCenter.x >= 0)
+                                     ? tmplMatchCenter
+                                     : (hasPrevEllipse ? prevEllipse.center
+                                                       : cv::Point2f(-1.f, -1.f));
+            float bestDistSq = std::numeric_limits<float>::max();
+            for (int i = 0; i < static_cast<int>(contours.size()); ++i) {
+                if (contours[i].size() < 5) continue;
+                if (anchor.x < 0) { bestIdx = i; break; } // no anchor → take first valid
+                cv::RotatedRect el = cv::fitEllipseAMS(contours[i]);
+                float dx = el.center.x - anchor.x;
+                float dy = el.center.y - anchor.y;
+                float dSq = dx * dx + dy * dy;
+                if (dSq < bestDistSq) { bestDistSq = dSq; bestIdx = i; }
+            }
+        }
+
+        // --- Create / update template from the best contour ---
+        if (tmplCfg.enabled && bestIdx >= 0) {
+            cv::RotatedRect bestEl   = cv::fitEllipseAMS(contours[bestIdx]);
             cv::Rect        tmplRect = bestEl.boundingRect();
             tmplRect &= cv::Rect(0, 0, gray.cols, gray.rows);
             if (tmplRect.width > 0 && tmplRect.height > 0) {
@@ -154,11 +177,11 @@ int main(int argc, char* argv[]) {
             cv::imshow("Template", ellipseTemplate);
 
         // --- Update prevEllipse for next frame ---
-        // If a contour was found, update with the precise fit.
+        // If a contour was found, update with the precise fit of the best one.
         // Otherwise keep all parameters from the previous frame unchanged
         // so the next frame's search stays anchored at the last known position.
-        if (!contours.empty() && contours[0].size() >= 5) {
-            prevEllipse    = cv::fitEllipseAMS(contours[0]);
+        if (bestIdx >= 0) {
+            prevEllipse    = cv::fitEllipseAMS(contours[bestIdx]);
             hasPrevEllipse = true;
         } else if (tmplMatchCenter.x >= 0) {
             hasPrevEllipse = true; // prevEllipse.center already updated by template match
