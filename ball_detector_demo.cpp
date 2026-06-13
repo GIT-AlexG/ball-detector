@@ -210,7 +210,11 @@ int main(int argc, char* argv[]) {
                         cv::FONT_HERSHEY_SIMPLEX, 0.45, {0, 128, 255}, 1);
         }
 
-        std::cout << "Detected " << contours.size() << " contour(s)\n";
+        std::cout << "Detected " << contours.size() << " contour(s)";
+        if (tmplCfg.enabled && hasTemplate)
+            std::cout << "  |  TM score: " << cv::format("%.3f", tmplMatchScore)
+                      << (tmplMatchCenter.x >= 0 ? " [match]" : " [miss]");
+        std::cout << "\n";
         return vis;
     };
 
