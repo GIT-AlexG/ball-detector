@@ -139,11 +139,11 @@ int main(int argc, char* argv[]) {
                     std::cout << "Template created: "
                               << tmplRect.width << "x" << tmplRect.height << " px\n";
                 } else {
-                    // Weighted update: 70 % new patch, 30 % existing template
+                    // Weighted update: 20 % new patch, 80 % existing template
                     cv::Mat newPatchResized;
                     cv::resize(newPatch, newPatchResized, ellipseTemplate.size());
-                    cv::addWeighted(newPatchResized, 0.7,
-                                    ellipseTemplate,  0.3,
+                    cv::addWeighted(newPatchResized, 0.2,
+                                    ellipseTemplate,  0.8,
                                     0.0, ellipseTemplate);
                 }
             }
