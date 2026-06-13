@@ -3,13 +3,13 @@
 
 int main(int argc, char* argv[]) {
     // --- Parse flags ---
-    bool focusedMode = false;
+    bool focusedMode  = false;
+    bool templateMode = false;
     const char* inputPath = nullptr;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--focused")
-            focusedMode = true;
-        else if (inputPath == nullptr)
-            inputPath = argv[i];
+        if      (std::string(argv[i]) == "--focused")  focusedMode  = true;
+        else if (std::string(argv[i]) == "--template") templateMode = true;
+        else if (inputPath == nullptr)                 inputPath    = argv[i];
     }
 
     // --- Load image or open camera ---
@@ -39,10 +39,10 @@ int main(int argc, char* argv[]) {
 
     // --- Configuration ---
     BallDetectorConfig cfg;
-    RansacConfig ransacCfg;
+    RansacConfig       ransacCfg;
     cfg.minRadius        = 15.0;
     cfg.maxRadius        = 200.0;
-    cfg.minAxisRatio     = 1.0 / 1.2;  // reject if major > 1.2 * minor
+    cfg.minAxisRatio     = 1.0 / 1.2;
     cfg.cannyLow         = 20.0;
     cfg.cannyHigh        = 60.0;
     cfg.maxFitResidual   = 0.07;
@@ -52,22 +52,83 @@ int main(int argc, char* argv[]) {
     FocusedSearchConfig focusCfg;
     focusCfg.enabled = focusedMode;
 
-    // State for focused search: ellipse from the previous frame
+    TemplateConfig tmplCfg;
+    tmplCfg.enabled = templateMode;
+
+    // --- Persistent state across frames ---
     cv::RotatedRect prevEllipse;
-    bool hasPrevEllipse = false;
+    bool            hasPrevEllipse = false;
+
+    cv::Mat ellipseTemplate;
+    bool    hasTemplate = false;
 
     auto processFrame = [&](const cv::Mat& img) {
+        // Grayscale needed for template creation and matching
+        cv::Mat gray;
+        cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+
+        // --- Template matching: update prevEllipse position before focused search ---
+        cv::Point2f tmplMatchCenter(-1.f, -1.f);
+        float       tmplMatchScore = 0.f;
+
+        if (tmplCfg.enabled && hasTemplate && hasPrevEllipse) {
+            float halfW = ellipseTemplate.cols * 0.5f * static_cast<float>(tmplCfg.searchScale);
+            float halfH = ellipseTemplate.rows * 0.5f * static_cast<float>(tmplCfg.searchScale);
+            int sx0 = std::max(0,         static_cast<int>(prevEllipse.center.x - halfW));
+            int sy0 = std::max(0,         static_cast<int>(prevEllipse.center.y - halfH));
+            int sx1 = std::min(gray.cols, static_cast<int>(prevEllipse.center.x + halfW));
+            int sy1 = std::min(gray.rows, static_cast<int>(prevEllipse.center.y + halfH));
+
+            if (sx1 - sx0 >= ellipseTemplate.cols && sy1 - sy0 >= ellipseTemplate.rows) {
+                cv::Mat searchRegion = gray(cv::Rect(sx0, sy0, sx1 - sx0, sy1 - sy0));
+                cv::Mat matchResult;
+                cv::matchTemplate(searchRegion, ellipseTemplate, matchResult, cv::TM_CCOEFF_NORMED);
+
+                double   maxVal;
+                cv::Point maxLoc;
+                cv::minMaxLoc(matchResult, nullptr, &maxVal, nullptr, &maxLoc);
+                tmplMatchScore = static_cast<float>(maxVal);
+
+                if (maxVal >= tmplCfg.matchThreshold) {
+                    // Shift prevEllipse center to match position for focused search
+                    prevEllipse.center.x = sx0 + maxLoc.x + ellipseTemplate.cols * 0.5f;
+                    prevEllipse.center.y = sy0 + maxLoc.y + ellipseTemplate.rows * 0.5f;
+                    tmplMatchCenter = prevEllipse.center;
+                }
+            }
+        }
+
+        // --- Contour-based detection (focused search uses updated prevEllipse) ---
         const cv::RotatedRect* prevPtr = hasPrevEllipse ? &prevEllipse : nullptr;
         auto contours = detectBallContours(img, cfg, focusCfg, prevPtr);
 
-        // Update previous ellipse for next frame (use first detection)
+        // --- Create template from first detection ---
+        if (tmplCfg.enabled && !hasTemplate && !contours.empty() && contours[0].size() >= 5) {
+            cv::RotatedRect bestEl   = cv::fitEllipseAMS(contours[0]);
+            cv::Rect        tmplRect = bestEl.boundingRect();
+            tmplRect &= cv::Rect(0, 0, gray.cols, gray.rows); // clamp to image
+            if (tmplRect.width > 0 && tmplRect.height > 0) {
+                ellipseTemplate = gray(tmplRect).clone();
+                hasTemplate     = true;
+                std::cout << "Template created: "
+                          << tmplRect.width << "x" << tmplRect.height << " px\n";
+            }
+        }
+
+        // --- Update prevEllipse for next frame ---
         if (!contours.empty() && contours[0].size() >= 5) {
             prevEllipse    = cv::fitEllipseAMS(contours[0]);
             hasPrevEllipse = true;
+        } else if (tmplMatchCenter.x >= 0) {
+            // Template matched but contour detection failed —
+            // keep template position so focused search can try again next frame
+            hasPrevEllipse = true;
+            // prevEllipse.center already set to tmplMatchCenter above
         } else {
             hasPrevEllipse = false;
         }
 
+        // --- Visualisation ---
         cv::Mat vis = img.clone();
         cv::drawContours(vis, contours, -1, {0, 255, 0}, 2);
 
@@ -85,7 +146,6 @@ int main(int argc, char* argv[]) {
             for (const auto& p : inliers)
                 cv::circle(vis, p, 2, {0, 255, 255}, -1);
 
-            // Label: axis ratio / inlier count
             float major = std::max(elRansac.size.width, elRansac.size.height) * 0.5f;
             float minor = std::min(elRansac.size.width, elRansac.size.height) * 0.5f;
             std::string label = cv::format("%.2f  %d/%d",
@@ -98,6 +158,18 @@ int main(int argc, char* argv[]) {
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, {255, 255, 255}, 1);
         }
 
+        // Template match indicator (orange)
+        if (tmplMatchCenter.x >= 0) {
+            cv::Point center(static_cast<int>(tmplMatchCenter.x),
+                             static_cast<int>(tmplMatchCenter.y));
+            cv::circle(vis, center,
+                       std::max(ellipseTemplate.cols, ellipseTemplate.rows) / 2,
+                       {0, 128, 255}, 2);
+            cv::putText(vis, cv::format("TM %.2f", tmplMatchScore),
+                        center + cv::Point(8, -8),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.45, {0, 128, 255}, 1);
+        }
+
         std::cout << "Detected " << contours.size() << " contour(s)\n";
         return vis;
     };
@@ -108,7 +180,7 @@ int main(int argc, char* argv[]) {
         cv::waitKey(0);
     } else {
         const int totalFrames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
-        const bool isVideo = totalFrames > 1; // false for live camera
+        const bool isVideo = totalFrames > 1;
 
         int sliderPos = 0;
         if (isVideo)
@@ -122,8 +194,9 @@ int main(int argc, char* argv[]) {
                 int pos = cv::getTrackbarPos("Frame", "Ball Detector");
                 if (pos != lastSetPos) {
                     cap.set(cv::CAP_PROP_POS_FRAMES, pos);
-                    lastSetPos = pos;
-                    hasPrevEllipse = false; // temporal continuity broken after seek
+                    lastSetPos     = pos;
+                    hasPrevEllipse = false; // position unknown after seek
+                    // hasTemplate stays: appearance of ball is still valid
                 }
             }
 
@@ -138,8 +211,8 @@ int main(int argc, char* argv[]) {
             cv::imshow("Ball Detector", vis);
 
             int key = cv::waitKey(30);
-            if (key == 27) break;                     // ESC: quit
-            if (key == 32 && isVideo) cv::waitKey(0); // Space: pause
+            if (key == 27) break;
+            if (key == 32 && isVideo) cv::waitKey(0);
         }
     }
 

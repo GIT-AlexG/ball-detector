@@ -57,6 +57,14 @@ struct FocusedSearchConfig {
     RansacConfig ransac;                // inner ransacRefineEllipse config
 };
 
+struct TemplateConfig {
+    bool   enabled        = false;
+    // Search region radius as a multiple of the template's half-size
+    double searchScale    = 2.5;
+    // Minimum TM_CCOEFF_NORMED score to accept a template match
+    double matchThreshold = 0.5;
+};
+
 // Returns all contours that are consistent with a ball of the configured shape.
 // Partial contours (arcs) are included if they fit an ellipse well.
 // If focusCfg.enabled and prevEllipse is non-null, additionally searches a
