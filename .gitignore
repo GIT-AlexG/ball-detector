@@ -1,0 +1,10 @@
+# Build output
+build/
+
+# Editor / tooling
+.claude/
+
+# Temporary / backup files
+*.TMP
+*~RF*.TMP
+*~
