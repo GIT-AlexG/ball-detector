@@ -49,7 +49,8 @@ static double interiorCV(const cv::Mat& gray, const cv::RotatedRect& el) {
     return stddev[0] / mean[0];
 }
 
-// Greedy NMS: sort by major axis (largest first), suppress any later ellipse
+// Greedy NMS: rank by a quality score (many contour points + good ellipse fit
+// win over short, poorly-fitting arcs), then suppress any lower-ranked ellipse
 // whose center falls within overlapFraction * avg(major_a, major_b) of an
 // already-accepted one.
 static std::vector<std::vector<cv::Point>> applyNMS(
@@ -58,17 +59,21 @@ static std::vector<std::vector<cv::Point>> applyNMS(
 {
     if (contours.empty() || overlapFraction <= 0.0) return contours;
 
-    struct Entry { int idx; cv::RotatedRect el; float major; };
+    struct Entry { int idx; cv::RotatedRect el; float major; double score; };
     std::vector<Entry> entries;
     entries.reserve(contours.size());
     for (int i = 0; i < static_cast<int>(contours.size()); ++i) {
         if (contours[i].size() < 5) continue;
         cv::RotatedRect el = cv::fitEllipseAMS(contours[i]);
         float major = std::max(el.size.width, el.size.height) * 0.5f;
-        entries.push_back({i, el, major});
+        // Score: point count weighted by fit quality (1 - mean residual).
+        // Favours contours that span a large arc AND hug the ellipse closely.
+        double fitQuality = std::max(0.0, 1.0 - meanResidual(contours[i], el));
+        double score      = static_cast<double>(contours[i].size()) * fitQuality;
+        entries.push_back({i, el, major, score});
     }
     std::sort(entries.begin(), entries.end(),
-              [](const Entry& a, const Entry& b) { return a.major > b.major; });
+              [](const Entry& a, const Entry& b) { return a.score > b.score; });
 
     std::vector<bool> suppressed(entries.size(), false);
     for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
@@ -170,45 +175,34 @@ static std::vector<cv::Point> reorderOpenContour(const std::vector<cv::Point>& c
     return sorted;
 }
 
-// For a focused-search contour: outer RANSAC tries random endpoint cuts,
-// runs ransacRefineEllipse on each trimmed segment, keeps the result with
-// the most inliers. Returns an empty vector if no good fit is found.
-static std::vector<cv::Point> trimAndRefineContour(
+// For a focused-search contour: deterministically cuts segments off the front
+// and back. For every combination of {10,20,30,40}% cut from the start and
+// {10,20,30,40}% cut from the end, the remaining middle segment is emitted as
+// its own contour. The many near-identical ellipses this produces are later
+// collapsed by NMS. No RANSAC involved.
+static std::vector<std::vector<cv::Point>> generateTrimmedContours(
     const std::vector<cv::Point>& contour,
-    const FocusedSearchConfig&    focusCfg,
     int                           minPoints)
 {
     const int n = static_cast<int>(contour.size());
     constexpr int kMin = 5;
-    if (n < kMin) return {};
+    std::vector<std::vector<cv::Point>> out;
+    if (n < kMin) return out;
 
-    std::mt19937 rng(42);
-    const int maxCut = static_cast<int>(n * focusCfg.ransac.maxCutFraction);
-    std::uniform_int_distribution<int> cutDist(0, std::max(0, maxCut));
+    static const double kFractions[] = {0.10, 0.20, 0.30, 0.40};
 
-    int bestInlierCount = 0;
-    std::vector<cv::Point> bestInliers;
+    for (double fStart : kFractions) {
+        for (double fEnd : kFractions) {
+            int cutStart = static_cast<int>(n * fStart);
+            int cutEnd   = static_cast<int>(n * fEnd);
+            if (n - cutStart - cutEnd < std::max(kMin, minPoints))
+                continue;
 
-    for (int iter = 0; iter < focusCfg.trimIterations; ++iter) {
-        // Random endpoint cuts anchored at the first / last contour point
-        int cutStart = cutDist(rng);
-        int cutEnd   = cutDist(rng);
-        if (n - cutStart - cutEnd < kMin) continue;
-
-        std::vector<cv::Point> trimmed(contour.begin() + cutStart,
-                                       contour.end()   - cutEnd);
-
-        std::vector<cv::Point> inliers;
-        ransacRefineEllipse(trimmed, focusCfg.ransac, inliers);
-
-        if (static_cast<int>(inliers.size()) > bestInlierCount) {
-            bestInlierCount = static_cast<int>(inliers.size());
-            bestInliers     = inliers;
+            out.emplace_back(contour.begin() + cutStart,
+                             contour.end()   - cutEnd);
         }
     }
-
-    if (bestInlierCount >= minPoints) return bestInliers;
-    return {};
+    return out;
 }
 
 // Returns true if a contour's fitted ellipse passes all shape/quality filters.
@@ -245,7 +239,8 @@ std::vector<std::vector<cv::Point>> detectBallContours(
     const cv::Mat&             frame,
     const BallDetectorConfig&  cfg,
     const FocusedSearchConfig& focusCfg,
-    const cv::RotatedRect*     prevEllipse)
+    const cv::RotatedRect*     prevEllipse,
+    cv::Mat*                   focusCannyOut)
 {
     // 1. Convert to grayscale and blur to suppress JPEG block artifacts
     cv::Mat gray;
@@ -292,6 +287,7 @@ std::vector<std::vector<cv::Point>> detectBallContours(
         if (x1 > x0 && y1 > y0) {
             cv::Rect cropRect(x0, y0, x1 - x0, y1 - y0);
             cv::Mat cropEdges = edges(cropRect).clone();
+            if (focusCannyOut) *focusCannyOut = cropEdges;
 
             std::vector<std::vector<cv::Point>> cropContours;
             cv::findContours(cropEdges, cropContours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
@@ -307,17 +303,14 @@ std::vector<std::vector<cv::Point>> detectBallContours(
                 // Rotate so geometric arc endpoints are at index 0 and n-1
                 fc = reorderOpenContour(fc);
 
-                // Outer RANSAC: try random endpoint cuts, run ransacRefineEllipse
-                // on each trimmed segment, keep the inlier set with most support
-                auto refined = trimAndRefineContour(fc, focusCfg, cfg.minContourPoints);
-                if (refined.empty())
-                    continue;
-
-                // Apply the same shape/quality filters as the global search so
-                // degenerate ellipses (e.g. thin 1xN lines) cannot slip through
-                cv::RotatedRect rel = cv::fitEllipseAMS(refined);
-                if (passesEllipseFilters(refined, rel, gray, cfg))
-                    result.push_back(std::move(refined));
+                // Cut all {10,20,30,40}% front × back combinations off this
+                // contour and add each remaining segment to the list. The many
+                // overlapping ellipses are collapsed afterwards by NMS.
+                for (auto& trimmed : generateTrimmedContours(fc, cfg.minContourPoints)) {
+                    cv::RotatedRect rel = cv::fitEllipseAMS(trimmed);
+                    if (passesEllipseFilters(trimmed, rel, gray, cfg))
+                        result.push_back(std::move(trimmed));
+                }
             }
         }
     }
@@ -332,7 +325,7 @@ cv::RotatedRect ransacRefineEllipse(
     std::vector<cv::Point>& inliers)
 {
     const int n = static_cast<int>(contour.size());
-    constexpr int kSample = 5; // minimum points required by fitEllipseAMS
+    constexpr int kSample = 20; // minimum points required by fitEllipseAMS
 
     if (n < kSample) {
         inliers = contour;

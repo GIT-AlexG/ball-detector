@@ -51,14 +51,12 @@ struct RansacConfig {
 };
 
 // Optional focused search: re-runs contour detection inside a 1.5× enlarged
-// crop around the previous frame's ellipse, RANSAC-trims each found contour,
-// and merges the results with the global detection before NMS.
+// crop around the previous frame's ellipse, cuts each found contour at all
+// {10,20,30,40}% front × back combinations, and merges every resulting segment
+// into the global detection before NMS.
 struct FocusedSearchConfig {
-    bool         enabled       = false;
-    double       cropScale     = 1.5;  // half-axes multiplied by this for crop size
-    // Outer RANSAC: how many (cutStart, cutEnd) pairs to try per contour
-    int          trimIterations = 50;
-    RansacConfig ransac;                // inner ransacRefineEllipse config
+    bool   enabled   = false;
+    double cropScale = 1.5;  // half-axes multiplied by this for crop size
 };
 
 struct TemplateConfig {
@@ -80,8 +78,9 @@ struct TemplateConfig {
 std::vector<std::vector<cv::Point>> detectBallContours(
     const cv::Mat&             frame,
     const BallDetectorConfig&  cfg,
-    const FocusedSearchConfig& focusCfg    = {},
-    const cv::RotatedRect*     prevEllipse = nullptr);
+    const FocusedSearchConfig& focusCfg      = {},
+    const cv::RotatedRect*     prevEllipse   = nullptr,
+    cv::Mat*                   focusCannyOut = nullptr);
 
 // RANSAC-based ellipse refinement: removes outlier points from a contour,
 // fits an ellipse to the inlier consensus set, and returns it.

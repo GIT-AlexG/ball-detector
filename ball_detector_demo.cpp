@@ -1,17 +1,39 @@
 #include "ball_detector.hpp"
 #include <iostream>
 #include <limits>
+#include <filesystem>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 int main(int argc, char* argv[]) {
     // --- Parse flags ---
     bool focusedMode  = false;
     bool templateMode = false;
+    bool saveMode     = false;
     const char* inputPath = nullptr;
+    int startFrame = 0;
     for (int i = 1; i < argc; ++i) {
         if      (std::string(argv[i]) == "--focused")  focusedMode  = true;
         else if (std::string(argv[i]) == "--template") templateMode = true;
+        else if (std::string(argv[i]) == "--save")     saveMode     = true;
+        else if (std::string(argv[i]) == "--start-frame" && i + 1 < argc)
+            startFrame = std::atoi(argv[++i]);
         else if (inputPath == nullptr)                 inputPath    = argv[i];
     }
+
+    // --- Output directory for saved frames (named by current time) ---
+    std::filesystem::path saveDir;
+    if (saveMode) {
+        std::time_t t  = std::time(nullptr);
+        std::tm     lt = *std::localtime(&t);
+        std::ostringstream name;
+        name << std::put_time(&lt, "%Y-%m-%d_%H-%M-%S");
+        saveDir = std::filesystem::current_path() / name.str();
+        std::filesystem::create_directories(saveDir);
+        std::cout << "Saving frames to: " << saveDir.string() << "\n";
+    }
+    int saveCounter = 0;
 
     // --- Load image or open camera ---
     cv::Mat frame;
@@ -63,9 +85,35 @@ int main(int argc, char* argv[]) {
     cv::Mat ellipseTemplate;
     bool    hasTemplate = false;
 
+    // --- Adaptive axis-ratio gating ---
+    // Once a ball has been tracked for a while we know its axis ratio fairly
+    // well; it may drift slowly but never jumps. So we progressively tighten the
+    // allowed minAxisRatio around the learned value, rejecting spurious elongated
+    // fits. After a sustained miss the tolerance is reset to the initial value.
+    const double initialMinAxisRatio = cfg.minAxisRatio;
+    constexpr int    kWarmupFrames = 5;     // hits before tightening starts
+    constexpr int    kResetMisses  = 5;     // misses before resetting tolerance
+    constexpr double kLooseTol     = 0.15;  // tolerance just after warmup
+    constexpr double kTightTol     = 0.05;  // tolerance floor for a long track
+    constexpr double kTolStep      = 0.02;  // tolerance shrink per extra hit
+    double trackedRatio = 0.0;              // running estimate of minor/major
+    int    trackStreak  = 0;                // consecutive successful detections
+    int    missStreak   = 0;                // consecutive frames without a ball
+
     auto processFrame = [&](const cv::Mat& img) {
         cv::Mat gray;
         cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+
+        // Tighten the allowed axis ratio once the track is established. The
+        // tolerance shrinks the longer the ball has been followed; below the
+        // warmup count the initial (loose) value is used.
+        if (trackStreak >= kWarmupFrames && trackedRatio > 0.0) {
+            double tol = std::max(kTightTol,
+                                  kLooseTol - (trackStreak - kWarmupFrames) * kTolStep);
+            cfg.minAxisRatio = std::max(initialMinAxisRatio, trackedRatio - tol);
+        } else {
+            cfg.minAxisRatio = initialMinAxisRatio;
+        }
 
         // --- Template matching: update prevEllipse before detection ---
         cv::Point2f tmplMatchCenter(-1.f, -1.f);
@@ -120,7 +168,9 @@ int main(int argc, char* argv[]) {
 
         // Run contour detection on the (possibly cropped) frame
         cv::Mat roiFrame = img(searchROI);
-        auto contours = detectBallContours(roiFrame, cfg, focusCfg, prevPtr);
+        cv::Mat focusCanny;
+        auto contours = detectBallContours(roiFrame, cfg, focusCfg, prevPtr,
+                                           focusCfg.enabled ? &focusCanny : nullptr);
 
         // Translate contour points back to full-image coordinates
         for (auto& c : contours)
@@ -172,10 +222,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Show current template in a separate window
-        if (tmplCfg.enabled && hasTemplate)
-            cv::imshow("Template", ellipseTemplate);
-
         // --- Update prevEllipse for next frame ---
         // If a contour was found, update with the precise fit of the best one.
         // Otherwise keep all parameters from the previous frame unchanged
@@ -187,6 +233,22 @@ int main(int argc, char* argv[]) {
             hasPrevEllipse = true; // prevEllipse.center already updated by template match
         }
         // else: hasPrevEllipse and prevEllipse remain as-is
+
+        // --- Update adaptive axis-ratio tracking ---
+        if (bestIdx >= 0) {
+            double major = std::max(prevEllipse.size.width, prevEllipse.size.height) * 0.5;
+            double minor = std::min(prevEllipse.size.width, prevEllipse.size.height) * 0.5;
+            double ratio = (major > 0.0) ? (minor / major) : 0.0;
+            // Running average so the learned ratio drifts slowly with the ball.
+            trackedRatio = (trackStreak == 0) ? ratio
+                                              : 0.8 * trackedRatio + 0.2 * ratio;
+            ++trackStreak;
+            missStreak = 0;
+        } else if (++missStreak >= kResetMisses) {
+            // Lost the ball for a while → forget the learned ratio.
+            trackStreak  = 0;
+            trackedRatio = 0.0;
+        }
 
         // --- Visualisation ---
         cv::Mat vis = img.clone();
@@ -205,12 +267,21 @@ int main(int argc, char* argv[]) {
 
             std::vector<cv::Point> inliers;
             cv::RotatedRect elRansac = ransacRefineEllipse(c, ransacCfg, inliers);
-            cv::ellipse(vis, elRansac, {255, 255, 0}, 2);
-            for (const auto& p : inliers)
-                cv::circle(vis, p, 2, {0, 255, 255}, -1);
 
             float major = std::max(elRansac.size.width, elRansac.size.height) * 0.5f;
             float minor = std::min(elRansac.size.width, elRansac.size.height) * 0.5f;
+
+            // The RANSAC fit uses only a subset of points and is not run through
+            // detectBallContours' shape filters, so it can be far more elongated
+            // than the accepted contour. Reject it here with the same axis-ratio
+            // gate before drawing, otherwise stray elongated ellipses appear.
+            double ransacRatio = (major > 0.f) ? (minor / major) : 0.0;
+            if (ransacRatio < cfg.minAxisRatio)
+                continue;
+
+            cv::ellipse(vis, elRansac, {255, 255, 0}, 2);
+            for (const auto& p : inliers)
+                cv::circle(vis, p, 2, {0, 255, 255}, -1);
             std::string label = cv::format("%.2f  %d/%d",
                                            minor / major,
                                            static_cast<int>(inliers.size()),
@@ -233,6 +304,72 @@ int main(int argc, char* argv[]) {
                         cv::FONT_HERSHEY_SIMPLEX, 0.45, {0, 128, 255}, 1);
         }
 
+        // --- Inset overlays in the top-left corner ---
+        // Draw the focused-search Canny crop and the current template directly
+        // into vis (side by side) instead of using separate windows.
+        {
+            int insetX = 5;
+            const int insetY = 5;
+            auto blit = [&](const cv::Mat& src) {
+                if (src.empty()) return;
+                cv::Mat bgr;
+                if (src.channels() == 1) cv::cvtColor(src, bgr, cv::COLOR_GRAY2BGR);
+                else                     bgr = src;
+                int w = std::min(bgr.cols, vis.cols - insetX);
+                int h = std::min(bgr.rows, vis.rows - insetY);
+                if (w <= 0 || h <= 0) return;
+                cv::Rect dst(insetX, insetY, w, h);
+                bgr(cv::Rect(0, 0, w, h)).copyTo(vis(dst));
+                cv::rectangle(vis, dst, {255, 255, 255}, 1);
+                insetX += w + 5;  // next inset goes to the right
+            };
+
+            if (focusCfg.enabled) blit(focusCanny);
+            if (tmplCfg.enabled && hasTemplate) blit(ellipseTemplate);
+
+            // Top-right: crop around the final ball with its fitted ellipse drawn in.
+            if (bestIdx >= 0) {
+                cv::RotatedRect finalEl = cv::fitEllipseAMS(contours[bestIdx]);
+                cv::Rect r = finalEl.boundingRect();
+                // Pad the crop a little so the whole ellipse is visible
+                int pad = 8;
+                r.x -= pad; r.y -= pad; r.width += 2 * pad; r.height += 2 * pad;
+                r &= cv::Rect(0, 0, img.cols, img.rows);
+                if (r.width > 0 && r.height > 0) {
+                    cv::Mat crop = img(r).clone();
+                    // Shift the ellipse into crop-local coordinates and draw it
+                    cv::RotatedRect localEl = finalEl;
+                    localEl.center.x -= r.x;
+                    localEl.center.y -= r.y;
+                    cv::ellipse(crop, localEl, {0, 0, 255}, 2);
+
+                    int w = std::min(crop.cols, vis.cols - 5);
+                    int h = std::min(crop.rows, vis.rows - 5);
+                    if (w > 0 && h > 0) {
+                        cv::Rect dst(vis.cols - w - 5, 5, w, h);
+                        crop(cv::Rect(0, 0, w, h)).copyTo(vis(dst));
+                        cv::rectangle(vis, dst, {255, 255, 255}, 1);
+                    }
+
+                    // Second crop below: same region, but with all the contour
+                    // points that were used to fit the ellipse drawn in.
+                    cv::Mat cropPts = img(r).clone();
+                    for (const auto& p : contours[bestIdx])
+                        cv::circle(cropPts, cv::Point(p.x - r.x, p.y - r.y),
+                                   1, {0, 255, 255}, -1);
+
+                    int y2 = 5 + h + 5;
+                    int w2 = std::min(cropPts.cols, vis.cols - 5);
+                    int h2 = std::min(cropPts.rows, vis.rows - y2);
+                    if (w2 > 0 && h2 > 0) {
+                        cv::Rect dst2(vis.cols - w2 - 5, y2, w2, h2);
+                        cropPts(cv::Rect(0, 0, w2, h2)).copyTo(vis(dst2));
+                        cv::rectangle(vis, dst2, {255, 255, 255}, 1);
+                    }
+                }
+            }
+        }
+
         std::cout << "Detected " << contours.size() << " contour(s)";
         if (tmplCfg.enabled && hasTemplate)
             std::cout << "  |  TM score: " << cv::format("%.3f", tmplMatchScore)
@@ -244,6 +381,8 @@ int main(int argc, char* argv[]) {
     if (!liveMode) {
         cv::Mat vis = processFrame(frame);
         cv::imshow("Ball Detector", vis);
+        if (saveMode)
+            cv::imwrite((saveDir / "frame_0000.png").string(), vis);
         cv::waitKey(0);
     } else {
         const int totalFrames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
@@ -254,7 +393,17 @@ int main(int argc, char* argv[]) {
             cv::createTrackbar("Frame", "Ball Detector", &sliderPos, totalFrames - 1);
 
         cv::Mat f;
-        int lastSetPos = 0;
+        int  lastSetPos  = 0;
+        bool stepMode    = true;   // P toggles; Space advances one frame
+        bool stepPending = false;
+
+        // Seek to start frame if requested
+        if (isVideo && startFrame > 0) {
+            int sf = std::min(startFrame, totalFrames - 1);
+            cap.set(cv::CAP_PROP_POS_FRAMES, sf);
+            lastSetPos = sf;
+            cv::setTrackbarPos("Frame", "Ball Detector", sf);
+        }
 
         while (true) {
             if (isVideo) {
@@ -263,22 +412,43 @@ int main(int argc, char* argv[]) {
                     cap.set(cv::CAP_PROP_POS_FRAMES, pos);
                     lastSetPos     = pos;
                     hasPrevEllipse = false;
+                    stepPending    = true;  // show the seeked frame immediately
                 }
             }
 
-            if (!cap.read(f)) break;
+            // In step mode only advance when Space was pressed (or a seek happened)
+            bool doRead = !stepMode || stepPending;
+            stepPending = false;
 
-            if (isVideo) {
-                lastSetPos = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES)) - 1;
-                cv::setTrackbarPos("Frame", "Ball Detector", lastSetPos);
+            if (doRead) {
+                if (!cap.read(f)) break;
+
+                if (isVideo) {
+                    lastSetPos = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES)) - 1;
+                    cv::setTrackbarPos("Frame", "Ball Detector", lastSetPos);
+                }
+
+                cv::Mat vis = processFrame(f);
+                cv::imshow("Ball Detector", vis);
+
+                if (saveMode) {
+                    int frameIdx = isVideo ? lastSetPos : saveCounter++;
+                    std::ostringstream fn;
+                    fn << "frame_" << std::setw(5) << std::setfill('0')
+                       << frameIdx << ".png";
+                    cv::imwrite((saveDir / fn.str()).string(), vis);
+                }
             }
 
-            cv::Mat vis = processFrame(f);
-            cv::imshow("Ball Detector", vis);
-
-            int key = cv::waitKey(30);
-            if (key == 27) break;
-            if (key == 32 && isVideo) cv::waitKey(0);
+            int key = cv::waitKey(stepMode ? 50 : 30);
+            if (key == 27)  break;                      // Esc — quit
+            if (key == 'p' || key == 'P') {             // P — toggle step/continuous
+                stepMode    = !stepMode;
+                stepPending = false;
+                std::cout << (stepMode ? "[step mode]\n" : "[continuous mode]\n");
+            }
+            if (key == 32 && isVideo && stepMode)       // Space — advance one frame
+                stepPending = true;
         }
     }
 
